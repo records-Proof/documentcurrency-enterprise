@@ -1,0 +1,16 @@
+
+# Env (never commit)
+.env
+apps/web/.env
+
+# Next build artifacts
+apps/web/.next/
+apps/web/out/
+apps/web/next
+apps/web/web@1.0.0
+
+# Prisma generated (re-generate in CI)
+infra/generated/
+
+# Node artifacts
+**/node_modules/
