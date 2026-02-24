@@ -30,3 +30,4 @@ infra/generated/
 
 # Node artifacts
 **/node_modules/
+apps/web/prisma.config.js
