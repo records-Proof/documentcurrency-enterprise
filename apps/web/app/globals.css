@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+:root{
+  --bg:#0B0E14;
+  --panel:#11151F;
+  --line:#1e2432;
+  --text:#E6E6E6;
+  --muted:#A7B0C0;
+  --gold:#F2D27A;
+}
+
+html,body{height:100%}
+body{ background: var(--bg); color: var(--text); }
+a{ color: var(--gold); }
