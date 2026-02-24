@@ -1,14 +1,25 @@
 import crypto from "node:crypto";
-import { PrismaClient } from "@prisma/client";
 
-const prisma = globalThis.__prisma || new PrismaClient();
-globalThis.__prisma = prisma;
+const DB_OFF = (process.env.DB_OFF || "").toLowerCase() === "true";
 
-// Simple in-memory rate limiter (upgrade to Redis in production)
+let prisma = null;
+
+async function getPrisma() {
+  if (DB_OFF) return null;
+  if (prisma) return prisma;
+
+  // Lazy import so Termux can run UI-only without Prisma crashing build
+  const mod = await import("@prisma/client");
+  const PrismaClient = mod.PrismaClient;
+
+  prisma = globalThis.__prisma || new PrismaClient();
+  globalThis.__prisma = prisma;
+  return prisma;
+}
+
+// Simple in-memory rate limiter (Redis later)
 const bucket = new Map();
-
 function nowMin() { return Math.floor(Date.now() / 60000); }
-
 function rateLimit(key, limitPerMin) {
   const m = nowMin();
   const k = `${key}:${m}`;
@@ -21,7 +32,6 @@ function sha256(s) {
   return crypto.createHash("sha256").update(s).digest("hex");
 }
 
-// API key format: dc_pk_<prefix>.<secret>
 function parseApiKey(hdr) {
   if (!hdr) return null;
   const v = hdr.replace(/^Bearer\s+/i, "").trim();
@@ -31,20 +41,22 @@ function parseApiKey(hdr) {
 }
 
 async function authFromRequest(req) {
-  const limit = Number(process.env.API_RATE_LIMIT_PER_MIN || "120");
-  const ip = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  if (DB_OFF) return null;
 
-  // Rate limit by IP always
-  if (!rateLimit(`ip:${ip}`, limit)) return null;
+  const limit = Number(process.env.API_RATE_LIMIT_PER_MIN || "120");
+  const ipAddr = req.headers.get("x-forwarded-for")?.split(",")[0]?.trim() || "unknown";
+  if (!rateLimit(`ip:${ipAddr}`, limit)) return null;
 
   const hdr = req.headers.get("authorization");
   const parsed = parseApiKey(hdr);
   if (!parsed) return null;
 
-  // Rate limit by key prefix too
   if (!rateLimit(`key:${parsed.prefix}`, limit)) return null;
 
-  const rec = await prisma.apiKey.findFirst({
+  const p = await getPrisma();
+  if (!p) return null;
+
+  const rec = await p.apiKey.findFirst({
     where: { prefix: parsed.prefix, revokedAt: null },
     select: { id: true, orgId: true, hash: true },
   });
@@ -53,7 +65,6 @@ async function authFromRequest(req) {
   const candidate = sha256(`${parsed.prefix}.${parsed.secret}`);
   if (candidate !== rec.hash) return null;
 
-  // For now: api-key auth only (no user). Later: add session auth -> userId.
   return { orgId: rec.orgId, userId: null, apiKeyId: rec.id };
 }
 
@@ -62,11 +73,15 @@ function ip(req) {
 }
 
 async function saveVerification({ orgId, cid, tld, verification }) {
-  await prisma.verification.create({
+  if (DB_OFF) return;
+  const p = await getPrisma();
+  if (!p) return;
+
+  await p.verification.create({
     data: {
       orgId,
       cid,
-      status: verification.checks.expired ? "EXPIRED" : (verification.ok ? "VERIFIED" : "INVALID"),
+      status: verification.checks?.expired ? "EXPIRED" : (verification.ok ? "VERIFIED" : "INVALID"),
       errorsJson: JSON.stringify(verification.errors || []),
       warningsJson: JSON.stringify(verification.warnings || []),
       tldJson: JSON.stringify(tld),
@@ -75,7 +90,11 @@ async function saveVerification({ orgId, cid, tld, verification }) {
 }
 
 async function latestAuditHash(orgId) {
-  const last = await prisma.auditLog.findFirst({
+  if (DB_OFF) return null;
+  const p = await getPrisma();
+  if (!p) return null;
+
+  const last = await p.auditLog.findFirst({
     where: { orgId },
     orderBy: { createdAt: "desc" },
     select: { hash: true },
@@ -83,16 +102,20 @@ async function latestAuditHash(orgId) {
   return last?.hash || null;
 }
 
-async function log({ orgId, userId, action, target, ip, meta }) {
+async function log({ orgId, userId, action, target, ip: ipAddr, meta }) {
+  if (DB_OFF) return;
+  const p = await getPrisma();
+  if (!p) return;
+
   const prevHash = await latestAuditHash(orgId);
   const metaJson = meta ? JSON.stringify(meta) : null;
-  const base = `${orgId}|${userId||""}|${action}|${target||""}|${ip||""}|${metaJson||""}|${prevHash||""}|${Date.now()}`;
+  const base = `${orgId}|${userId||""}|${action}|${target||""}|${ipAddr||""}|${metaJson||""}|${prevHash||""}|${Date.now()}`;
   const hash = sha256(base);
 
-  await prisma.auditLog.create({
-    data: { orgId, userId, action, target, ip, metaJson, prevHash, hash },
+  await p.auditLog.create({
+    data: { orgId, userId, action, target, ip: ipAddr, metaJson, prevHash, hash },
   });
 }
 
-export const db = { prisma, authFromRequest, ip, saveVerification };
+export const db = { getPrisma, authFromRequest, ip, saveVerification };
 export const audit = { log };
